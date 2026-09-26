@@ -317,7 +317,11 @@ def main():
     args = ap.parse_args()
 
     mlflow.set_tracking_uri(args.tracking_uri)
-    mlflow.set_experiment(EXPERIMENT)
+    exp = mlflow.set_experiment(EXPERIMENT)
+    # MLflow 3 guesses whether an experiment is GenAI or classic ML and may open
+    # it on a GenAI "Traces" page. Tell it explicitly: this is classic ML (runs).
+    mlflow.MlflowClient().set_experiment_tag(
+        exp.experiment_id, "mlflow.experimentKind", "custom_model_development")
     print(f"MLflow: {args.tracking_uri}  experiment: {EXPERIMENT}")
 
     print("Reading A1 split manifest ...")

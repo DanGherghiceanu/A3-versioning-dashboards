@@ -105,7 +105,7 @@ extra pipeline, and the dashboard can never modify the registry.
 │   ├── build_dashboard.py       generates the dashboard JSON (dashboard as code)
 │   └── readonly-user.sql
 ├── data/versions/v1, v2/        manifests, dataset cards, histograms (images are git-ignored)
-├── logs/                        console output of the run-2 rebuild
+├── logs/                        run-2 console output + run-1 comparison table
 └── screenshots/
 ```
 
@@ -195,8 +195,17 @@ drift alone.
 **Drift scores (PSI, v2 vs v1):** brightness **0.78**, contrast **6.84**
 (<0.1 stable, 0.1–0.25 moderate, >0.25 major).
 
-![Dataset versions compared in MLflow](screenshots/mlflow-datasets-compare.png)
-![Dataset v2 artifacts: v1 vs v2 samples](screenshots/mlflow-dataset-v2-artifacts.png)
+**Version history** — the two dataset runs in `xray-datasets`, each with its train/val/test
+datasets and digests, and MLflow's run comparison of v1 vs v2:
+
+![Dataset version runs in MLflow](screenshots/mlflow-datasets-runs.png)
+![Comparing dataset v1 and v2 in MLflow](screenshots/ml-flow-compare.png)
+
+**Metadata and artifacts** — brightness and contrast histograms (v2 against v1), and the same
+test images before and after the drift:
+
+![Brightness and contrast histograms, v2 vs v1](screenshots/mlflow-datasets-compare.png)
+![Same test images in v1 and v2](screenshots/mlflow-dataset-v2-artifacts.png)
 
 ---
 
@@ -237,8 +246,16 @@ Where the drift model's macro-F1 gain came from:
 | v1 | +0.113 | +0.068 | +0.045 |
 | v2 | +0.116 | **−0.020** | **+0.136** |
 
-![Model registry](screenshots/mlflow-model-registry.png)
+![Model registry: versions, aliases and tags](screenshots/mlflow-model-registry.png)
 ![Model comparison chart](screenshots/mlflow-model-comparison.png)
+
+From the first run (before the rebuild — numbers differ slightly from the tables above, see
+[Reproducibility check](#reproducibility-check)): the model runs, the drift model's run page
+with its datasets and registered version, and its training curves.
+
+![Model runs in xray-models (run 1)](screenshots/ml-flow-models.png)
+![Drift model run page (run 1)](screenshots/model-metrics-v2run.png)
+![Drift model training curves (run 1)](screenshots/metrics-v2-run-detail.png)
 
 ### Step 2b — Choosing the threshold honestly
 
@@ -326,6 +343,15 @@ The drift is visible **without labels** in two places: incoming brightness jumps
 ![Grafana — the models](screenshots/grafana-2-models.png)
 ![Grafana — live traffic](screenshots/grafana-3-live-traffic.png)
 
+The **Metric** selector switches section ② between metrics — macro F1 and NORMAL recall:
+
+![Macro F1 by model and test set](screenshots/grafa-sec2-macroF1-model-testset.png)
+![NORMAL recall by model and test set](screenshots/grafa-sec2-norm-recall-model-testset.png)
+
+Per-minute time series with batch markers and the dataset reference lines:
+
+![Live traffic time series](screenshots/grafa-sec3-live-traffic-graphs.png)
+
 ---
 
 ## Findings
@@ -369,6 +395,13 @@ again) and the results compared with the first run.
 | Model v2 (drift-retrained), macro F1 on test v1 / v2 | 0.929 → 0.935 / 0.826 → 0.837 |
 | Model v3 (control), macro F1 on test v1 / v2 | 0.884 → 0.890 / 0.665 → **0.701** |
 | Validation thresholds of retrained models | moved (e.g. control on v2: 0.909 → 0.741) |
+
+Evidence: `logs/run2_step1.txt` … `run2_step3.txt` (run 2 console output),
+`logs/run1_model_comparison.csv` (run 1 comparison table), and the run-1 console
+screenshots below.
+
+![Step 1 console output (run 1)](screenshots/ml-flow-shell.png)
+![Step 2 console output (run 1)](screenshots/ml-flow-registry-shell.png)
 
 Everything that involves no training reproduces bit for bit — the digests prove the data is
 the same. Retraining with the same code, data digest, seed and packages still varied by up
