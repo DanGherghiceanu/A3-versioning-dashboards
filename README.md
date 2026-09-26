@@ -10,6 +10,7 @@ one `docker compose up`.
 - **A2:** that model served as a FastAPI container on Cloud Run —
   [DanGherghiceanu/A2-deployment](https://github.com/DanGherghiceanu/A2-deployment).
 - **A3 (this repo):** versioning, drift, comparison and dashboards.
+- [DanGherghiceanu/A3-versioning-dashboards](https://github.com/DanGherghiceanu/A3-versioning-dashboards)
 
 > Coursework screening aid. Not a diagnostic device.
 
