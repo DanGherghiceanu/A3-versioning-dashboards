@@ -1,0 +1,18 @@
+# Grafana reads the same Postgres that MLflow writes to, with a read-only login
+# (created by the grafana-db-user service from grafana/readonly-user.sql).
+apiVersion: 1
+datasources:
+  - name: MLflow Postgres
+    type: grafana-postgresql-datasource
+    uid: mlflow-postgres
+    url: postgres:5432
+    user: grafana
+    isDefault: true
+    editable: false
+    jsonData:
+      database: mlflow
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: grafana

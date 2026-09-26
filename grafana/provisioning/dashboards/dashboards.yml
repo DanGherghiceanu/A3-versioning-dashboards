@@ -1,0 +1,11 @@
+# Load every dashboard JSON in /var/lib/grafana/dashboards into the "A3" folder.
+apiVersion: 1
+providers:
+  - name: A3 dashboards
+    folder: A3
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

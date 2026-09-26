@@ -1,0 +1,3 @@
+# Must match the torch that pickled the registered models (A1 / A2 / Step 2).
+torch==2.13.0
+torchvision==0.28.0

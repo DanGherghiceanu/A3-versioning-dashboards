@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Image data never goes in git - the manifests and digests record exactly what it was.
+data/versions/*/images/
+
+# Local MLflow files if someone runs without the server
+mlruns/
+mlartifacts/
+
+# Machine-specific paths
+.env
+
+# Local script outputs (the same files are stored in MLflow)
+reports/
+reports_*/
+
+# Model weights live in the A2 repo
+*.pt
+*.pkl

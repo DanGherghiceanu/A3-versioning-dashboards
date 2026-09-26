@@ -1,0 +1,110 @@
+# A3 stack.
+#
+#   postgres  - stores MLflow's runs, params, metrics, dataset records and the
+#               model registry, plus the app's prediction log (app_predictions).
+#               Grafana will read this same database in Step 4.
+#   mlflow    - tracking server + model registry UI on http://localhost:5000.
+#               Also stores artifacts (files, model weights) in a volume.
+#   app       - Streamlit app on http://localhost:8501 (Step 3).
+#   grafana   - dashboard on http://localhost:3000 (Step 4), reading Postgres
+#               through a read-only login created by grafana-db-user.
+#
+# Credentials are hard-coded because this is coursework on localhost only.
+# Machine-specific paths live in .env (copy .env.example to .env).
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: mlflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow -d mlflow"]
+      interval: 5s
+      retries: 10
+
+  mlflow:
+    build: ./mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://mlflow:mlflow@postgres:5432/mlflow
+      --serve-artifacts
+      --artifacts-destination /mlartifacts
+      --allowed-hosts localhost:5000,127.0.0.1:5000,mlflow:5000
+    volumes:
+      - mlartifacts:/mlartifacts
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 10
+
+  app:
+    build: ./app
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000       # inside the Docker network
+      MLFLOW_UI_URL: http://localhost:5000          # links opened by your browser
+      MONITORING_DB_URL: postgresql+psycopg2://mlflow:mlflow@postgres:5432/mlflow
+      DATA_ROOT_V1: /data/v1
+      DATA_ROOT_V2: /data/v2
+      MLFLOW_DISABLE_AGENT_HINT: "1"
+    volumes:
+      # Each dataset version's images, read-only. v1 lives in the A1 folder.
+      - ${A1_RAW_DIR:?Set A1_RAW_DIR in .env}:/data/v1:ro
+      - ./data/versions/v2/images:/data/v2:ro
+    ports:
+      - "8501:8501"
+
+  # One-shot job: creates the read-only "grafana" database login, then exits.
+  # Safe to rerun; also re-grants SELECT on any tables created since.
+  grafana-db-user:
+    image: postgres:16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: mlflow
+    volumes:
+      - ./grafana/readonly-user.sql:/readonly-user.sql:ro
+    command: psql -h postgres -U mlflow -d mlflow -v ON_ERROR_STOP=1 -f /readonly-user.sql
+    restart: "no"
+
+  grafana:
+    image: grafana/grafana:12.4.11
+    depends_on:
+      grafana-db-user:
+        condition: service_completed_successfully
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Anyone on this machine can view dashboards without logging in.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/xray-monitoring.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro   # datasource + dashboard loader
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro    # the dashboard JSON
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+  mlartifacts:
+  grafana-data:

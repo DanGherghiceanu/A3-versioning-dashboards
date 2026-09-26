@@ -1,0 +1,2072 @@
+{
+  "uid": "xray-monitoring",
+  "title": "X-ray classifier \u2014 versions & drift",
+  "tags": [
+    "A3",
+    "mlflow",
+    "drift"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-2h",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "version": 2,
+  "panels": [
+    {
+      "type": "text",
+      "id": 1,
+      "title": "",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Chest X-ray classifier \u2014 versioning & drift monitoring\nA story in three acts, read top to bottom. **\u2460 The data:** dataset **v1** is the original A1 data; **v2** is the same images through a simulated *new scanner* (brighter, lower contrast). **\u2461 The models:** the MLflow registry holds the A1 model (**v1**), a model retrained on drifted data (**v2**, `@champion`) and a **control** (**v3**) trained the same way on the old data. **\u2462 Live traffic:** predictions logged by the app. Vertical markers show where each traffic batch starts \u2014 watch image brightness and the PNEUMONIA share jump when drifted images arrive, with no labels needed, and settle when the retrained model takes over.\n\nSources: MLflow's Postgres tables (registry, runs, metrics) and the app's `app_predictions` log."
+      }
+    },
+    {
+      "type": "row",
+      "id": 2,
+      "title": "\u2460 The data \u2014 what changed between dataset versions",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "id": 3,
+      "title": "Dataset versions (MLflow dataset runs)",
+      "description": "One row per dataset version logged in Step 1. The digest is a hash of the dataset's contents: same digest = provably the same data.",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH ds AS (\n  SELECT DISTINCT ON (t.value) t.value AS version, r.run_uuid\n  FROM runs r\n  JOIN experiments e ON e.experiment_id = r.experiment_id AND e.name = 'xray-datasets'\n  JOIN tags t ON t.run_uuid = r.run_uuid AND t.key = 'dataset_version'\n  WHERE r.lifecycle_stage = 'active'\n  ORDER BY t.value, r.start_time DESC)\nSELECT ds.version AS \"Version\",\n       (SELECT value FROM tags WHERE run_uuid = ds.run_uuid AND key = 'dataset_digest') AS \"Digest\",\n       (SELECT value FROM tags WHERE run_uuid = ds.run_uuid AND key = 'parent_version') AS \"Derived from\",\n       max(CASE WHEN m.key = 'n_images' THEN m.value END) AS \"Images\",\n       max(CASE WHEN m.key = 'n_train' THEN m.value END) AS \"Train\",\n       max(CASE WHEN m.key = 'n_val' THEN m.value END) AS \"Val\",\n       max(CASE WHEN m.key = 'n_test' THEN m.value END) AS \"Test\",\n       max(CASE WHEN m.key = 'pct_pneumonia_test' THEN m.value END) AS \"% PNEUMONIA (test)\",\n       coalesce((SELECT 'contrast \u00d7' || max(CASE WHEN key = 'drift_contrast_factor' THEN value END)\n                  || ', brightness \u00d7' || max(CASE WHEN key = 'drift_brightness_factor' THEN value END)\n                  FROM params WHERE run_uuid = ds.run_uuid), '\u2014') AS \"Drift applied\"\nFROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid\nGROUP BY ds.version, ds.run_uuid ORDER BY ds.version"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(Images|Train|Val|Test)$"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(% PNEUMONIA \\(test\\))$"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Drift score \u00b7 brightness (PSI)",
+      "description": "Population Stability Index, v2 vs v1: <0.1 stable, 0.1\u20130.25 moderate, >0.25 major shift.",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH ds AS (\n  SELECT DISTINCT ON (t.value) t.value AS version, r.run_uuid\n  FROM runs r\n  JOIN experiments e ON e.experiment_id = r.experiment_id AND e.name = 'xray-datasets'\n  JOIN tags t ON t.run_uuid = r.run_uuid AND t.key = 'dataset_version'\n  WHERE r.lifecycle_stage = 'active'\n  ORDER BY t.value, r.start_time DESC)\nSELECT (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v2' AND m.key = 'psi_mean_intensity') AS \"PSI brightness\""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "Drift score \u00b7 contrast (PSI)",
+      "description": "Population Stability Index, v2 vs v1: <0.1 stable, 0.1\u20130.25 moderate, >0.25 major shift.",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 12
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH ds AS (\n  SELECT DISTINCT ON (t.value) t.value AS version, r.run_uuid\n  FROM runs r\n  JOIN experiments e ON e.experiment_id = r.experiment_id AND e.name = 'xray-datasets'\n  JOIN tags t ON t.run_uuid = r.run_uuid AND t.key = 'dataset_version'\n  WHERE r.lifecycle_stage = 'active'\n  ORDER BY t.value, r.start_time DESC)\nSELECT (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v2' AND m.key = 'psi_std_intensity') AS \"PSI contrast\""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "barchart",
+      "id": 6,
+      "title": "Image statistics by dataset version",
+      "description": "Average brightness and contrast (0\u2013255 pixel scale). The drift made images brighter and flatter; everything else (files, labels, split) is identical.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH ds AS (\n  SELECT DISTINCT ON (t.value) t.value AS version, r.run_uuid\n  FROM runs r\n  JOIN experiments e ON e.experiment_id = r.experiment_id AND e.name = 'xray-datasets'\n  JOIN tags t ON t.run_uuid = r.run_uuid AND t.key = 'dataset_version'\n  WHERE r.lifecycle_stage = 'active'\n  ORDER BY t.value, r.start_time DESC)\nSELECT 'Brightness (mean pixel)' AS \"measure\",\n       (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v1' AND m.key = 'mean_intensity_avg') AS \"dataset v1\", (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v2' AND m.key = 'mean_intensity_avg') AS \"dataset v2\"\nUNION ALL\nSELECT 'Contrast (std of pixels)',\n       (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v1' AND m.key = 'std_intensity_avg'), (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v2' AND m.key = 'std_intensity_avg')"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 90,
+            "lineWidth": 0,
+            "gradientMode": "none",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dataset v1"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2a78d6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dataset v2"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#eb6834"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "vertical",
+        "groupWidth": 0.75,
+        "barWidth": 0.95,
+        "showValue": "always",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 7,
+      "title": "\u2461 The models \u2014 what the registry knows",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "id": 8,
+      "title": "Registered model versions",
+      "description": "From the MLflow model registry: aliases, the dataset each version was trained on, test metrics at 0.50, and the threshold chosen on validation (Step 2b).",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH mv AS (\n  SELECT v.version, v.run_id,\n         max(CASE WHEN g.key = 'model_role' THEN g.value END) AS role,\n         max(CASE WHEN g.key = 'train_dataset_version' THEN g.value END) AS trained_on,\n         max(CASE WHEN g.key = 'recommended_threshold_v1' THEN g.value END)::float AS thr_v1,\n         max(CASE WHEN g.key = 'recommended_threshold_v2' THEN g.value END)::float AS thr_v2\n  FROM model_versions v\n  LEFT JOIN model_version_tags g ON g.name = v.name AND g.version = v.version\n  WHERE v.name = 'xray-pneumonia-classifier'\n  GROUP BY v.version, v.run_id),\nlabel AS (\n  SELECT version, run_id, role, trained_on, thr_v1, thr_v2,\n         'v' || version || ' ' || CASE role WHEN 'baseline' THEN 'A1 baseline'\n                                            WHEN 'retrained_for_drift' THEN 'drift-retrained'\n                                            WHEN 'control' THEN 'control' ELSE role END AS model\n  FROM mv), cal AS (\n  SELECT DISTINCT ON (tv.value) tv.value::int AS version, r.run_uuid\n  FROM runs r\n  JOIN tags tr ON tr.run_uuid = r.run_uuid AND tr.key = 'model_role' AND tr.value = 'calibration'\n  JOIN tags tv ON tv.run_uuid = r.run_uuid AND tv.key = 'calibrated_model_version'\n  WHERE r.lifecycle_stage = 'active'\n  ORDER BY tv.value, r.start_time DESC)\nSELECT l.model AS \"Model version\",\n       coalesce((SELECT string_agg('@' || alias, ' ' ORDER BY alias) FROM registered_model_aliases a\n                 WHERE a.name = 'xray-pneumonia-classifier' AND a.version = l.version), '') AS \"Aliases\",\n       l.trained_on AS \"Trained on\",\n       max(CASE WHEN m.key = 'test_v1_f1_macro' THEN m.value END) AS \"F1 test v1\",\n       max(CASE WHEN m.key = 'test_v2_f1_macro' THEN m.value END) AS \"F1 test v2\",\n       max(CASE WHEN m.key = 'test_v2_recall_normal' THEN m.value END) AS \"NORMAL recall v2\",\n       l.thr_v2 AS \"Threshold v2 (val)\",\n       (SELECT cm.value FROM cal JOIN latest_metrics cm ON cm.run_uuid = cal.run_uuid\n        WHERE cal.version = l.version AND cm.key = 'test_v2_f1_macro_at_threshold') AS \"F1 v2 @ val threshold\"\nFROM label l JOIN latest_metrics m ON m.run_uuid = l.run_id\nGROUP BY l.version, l.model, l.trained_on, l.thr_v2 ORDER BY l.version"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(F1 test v1|F1 test v2|NORMAL recall v2|F1 v2 @ val threshold)$"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(Threshold v2 \\(val\\))$"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "barchart",
+      "id": 9,
+      "title": "${metric:text} by model version and test set (threshold 0.50)",
+      "description": "Pick the metric with the selector at the top of the dashboard.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH mv AS (\n  SELECT v.version, v.run_id,\n         max(CASE WHEN g.key = 'model_role' THEN g.value END) AS role,\n         max(CASE WHEN g.key = 'train_dataset_version' THEN g.value END) AS trained_on,\n         max(CASE WHEN g.key = 'recommended_threshold_v1' THEN g.value END)::float AS thr_v1,\n         max(CASE WHEN g.key = 'recommended_threshold_v2' THEN g.value END)::float AS thr_v2\n  FROM model_versions v\n  LEFT JOIN model_version_tags g ON g.name = v.name AND g.version = v.version\n  WHERE v.name = 'xray-pneumonia-classifier'\n  GROUP BY v.version, v.run_id),\nlabel AS (\n  SELECT version, run_id, role, trained_on, thr_v1, thr_v2,\n         'v' || version || ' ' || CASE role WHEN 'baseline' THEN 'A1 baseline'\n                                            WHEN 'retrained_for_drift' THEN 'drift-retrained'\n                                            WHEN 'control' THEN 'control' ELSE role END AS model\n  FROM mv)\nSELECT l.model AS \"model\",\n       max(CASE WHEN m.key = 'test_v1_$metric' THEN m.value END) AS \"test v1 (original)\",\n       max(CASE WHEN m.key = 'test_v2_$metric' THEN m.value END) AS \"test v2 (drifted)\"\nFROM label l JOIN latest_metrics m ON m.run_uuid = l.run_id\nGROUP BY l.version, l.model ORDER BY l.version"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 90,
+            "lineWidth": 0,
+            "gradientMode": "none",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "test v1 (original)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2a78d6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "test v2 (drifted)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#eb6834"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "vertical",
+        "groupWidth": 0.75,
+        "barWidth": 0.95,
+        "showValue": "always",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "barchart",
+      "id": 10,
+      "title": "Drifted test set: how the threshold is chosen changes the story",
+      "description": "Macro F1 on the drifted test set. 'Peeking' picks the threshold on the test set itself \u2014 shown only to measure how optimistic that would be.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH mv AS (\n  SELECT v.version, v.run_id,\n         max(CASE WHEN g.key = 'model_role' THEN g.value END) AS role,\n         max(CASE WHEN g.key = 'train_dataset_version' THEN g.value END) AS trained_on,\n         max(CASE WHEN g.key = 'recommended_threshold_v1' THEN g.value END)::float AS thr_v1,\n         max(CASE WHEN g.key = 'recommended_threshold_v2' THEN g.value END)::float AS thr_v2\n  FROM model_versions v\n  LEFT JOIN model_version_tags g ON g.name = v.name AND g.version = v.version\n  WHERE v.name = 'xray-pneumonia-classifier'\n  GROUP BY v.version, v.run_id),\nlabel AS (\n  SELECT version, run_id, role, trained_on, thr_v1, thr_v2,\n         'v' || version || ' ' || CASE role WHEN 'baseline' THEN 'A1 baseline'\n                                            WHEN 'retrained_for_drift' THEN 'drift-retrained'\n                                            WHEN 'control' THEN 'control' ELSE role END AS model\n  FROM mv), cal AS (\n  SELECT DISTINCT ON (tv.value) tv.value::int AS version, r.run_uuid\n  FROM runs r\n  JOIN tags tr ON tr.run_uuid = r.run_uuid AND tr.key = 'model_role' AND tr.value = 'calibration'\n  JOIN tags tv ON tv.run_uuid = r.run_uuid AND tv.key = 'calibrated_model_version'\n  WHERE r.lifecycle_stage = 'active'\n  ORDER BY tv.value, r.start_time DESC)\nSELECT l.model AS \"model\",\n       max(CASE WHEN m.key = 'test_v2_f1_macro' THEN m.value END) AS \"default 0.50\",\n       max(CASE WHEN c.key = 'test_v2_f1_macro_at_threshold' THEN c.value END) AS \"chosen on validation (honest)\",\n       max(CASE WHEN c.key = 'test_v2_oracle_f1_macro' THEN c.value END) AS \"best on test (peeking)\"\nFROM label l\nJOIN latest_metrics m ON m.run_uuid = l.run_id\nLEFT JOIN cal ON cal.version = l.version\nLEFT JOIN latest_metrics c ON c.run_uuid = cal.run_uuid\nGROUP BY l.version, l.model ORDER BY l.version"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 90,
+            "lineWidth": 0,
+            "gradientMode": "none",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "default 0.50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#a3a29d"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "chosen on validation (honest)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2a78d6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "best on test (peeking)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#1baf7a"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "vertical",
+        "groupWidth": 0.75,
+        "barWidth": 0.95,
+        "showValue": "always",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "barchart",
+      "id": 11,
+      "title": "Fine-tuning curves \u2014 validation macro F1 per epoch",
+      "description": "Epoch 0 is the A1 model before fine-tuning, on each run's own validation data. The A1 model was never trained in A3, so it has no curve.",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH mv AS (\n  SELECT v.version, v.run_id,\n         max(CASE WHEN g.key = 'model_role' THEN g.value END) AS role,\n         max(CASE WHEN g.key = 'train_dataset_version' THEN g.value END) AS trained_on,\n         max(CASE WHEN g.key = 'recommended_threshold_v1' THEN g.value END)::float AS thr_v1,\n         max(CASE WHEN g.key = 'recommended_threshold_v2' THEN g.value END)::float AS thr_v2\n  FROM model_versions v\n  LEFT JOIN model_version_tags g ON g.name = v.name AND g.version = v.version\n  WHERE v.name = 'xray-pneumonia-classifier'\n  GROUP BY v.version, v.run_id),\nlabel AS (\n  SELECT version, run_id, role, trained_on, thr_v1, thr_v2,\n         'v' || version || ' ' || CASE role WHEN 'baseline' THEN 'A1 baseline'\n                                            WHEN 'retrained_for_drift' THEN 'drift-retrained'\n                                            WHEN 'control' THEN 'control' ELSE role END AS model\n  FROM mv)\nSELECT 'epoch ' || x.step AS \"epoch\",\n       max(CASE WHEN l.role = 'retrained_for_drift' THEN x.value END) AS \"drift-retrained (data v2)\",\n       max(CASE WHEN l.role = 'control' THEN x.value END) AS \"control (data v1)\"\nFROM label l JOIN metrics x ON x.run_uuid = l.run_id AND x.key = 'val_f1_macro'\nWHERE l.role IN ('retrained_for_drift', 'control')\nGROUP BY x.step ORDER BY x.step"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "min": 0.9,
+          "max": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 90,
+            "lineWidth": 0,
+            "gradientMode": "none",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "drift-retrained (data v2)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#eb6834"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "control (data v1)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#1baf7a"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "vertical",
+        "groupWidth": 0.75,
+        "barWidth": 0.95,
+        "showValue": "always",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 12,
+      "title": "\u2462 Live traffic \u2014 drift appearing and being fixed",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 13,
+      "title": "Predictions in time range",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 44
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT count(*) AS \"Predictions\" FROM app_predictions WHERE $__timeFilter(ts) AND ('${source}' = 'all' OR source = '${source}')"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#2a78d6",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 14,
+      "title": "Predicted PNEUMONIA \u00b7 last 100",
+      "description": "Share of the last 100 predictions that said PNEUMONIA. Needs no labels \u2014 a jump here is an early drift alarm. On undrifted data the A1 model sits near 77% (it over-flags); with 100 images, \u00b14 points is normal noise.",
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 4,
+        "y": 44
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT (100 * avg(predicted))::float AS \"Predicted PNEUMONIA\"\nFROM (SELECT predicted FROM app_predictions WHERE ('${source}' = 'all' OR source = '${source}') ORDER BY ts DESC LIMIT 100) last100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 83
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 15,
+      "title": "Actually PNEUMONIA \u00b7 last 100 labelled",
+      "description": "True share in the same traffic (known only because simulated traffic has labels).",
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 9,
+        "y": 44
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT (100 * avg(true_label))::float AS \"Actually PNEUMONIA\"\nFROM (SELECT true_label FROM app_predictions WHERE true_label IS NOT NULL AND ('${source}' = 'all' OR source = '${source}')\n      ORDER BY ts DESC LIMIT 100) last100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#2a78d6",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 16,
+      "title": "Brightness shift vs dataset v1 \u00b7 last 100",
+      "description": "|average brightness of the last 100 images \u2212 dataset v1 average|. Input drift, visible before any label arrives.",
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 14,
+        "y": 44
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH ds AS (\n  SELECT DISTINCT ON (t.value) t.value AS version, r.run_uuid\n  FROM runs r\n  JOIN experiments e ON e.experiment_id = r.experiment_id AND e.name = 'xray-datasets'\n  JOIN tags t ON t.run_uuid = r.run_uuid AND t.key = 'dataset_version'\n  WHERE r.lifecycle_stage = 'active'\n  ORDER BY t.value, r.start_time DESC)\nSELECT abs(avg(p.mean_intensity) - (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v1' AND m.key = 'mean_intensity_avg')) AS \"Brightness shift\"\nFROM (SELECT mean_intensity FROM app_predictions WHERE ('${source}' = 'all' OR source = '${source}') ORDER BY ts DESC LIMIT 100) p"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 17,
+      "title": "Accuracy \u00b7 last 100 labelled",
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 19,
+        "y": 44
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT (100 * avg((predicted = true_label)::int))::float AS \"Accuracy\"\nFROM (SELECT predicted, true_label FROM app_predictions WHERE true_label IS NOT NULL AND ('${source}' = 'all' OR source = '${source}')\n      ORDER BY ts DESC LIMIT 100) last100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "green",
+                "value": 84
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "barchart",
+      "id": 18,
+      "title": "The story, batch by batch \u2014 what the model predicted vs the truth",
+      "description": "One group per simulated traffic batch, in the order they ran. When drifted images reach the old model, predicted PNEUMONIA rises above the true share and accuracy falls; the retrained model brings them back together.",
+      "gridPos": {
+        "h": 10,
+        "w": 14,
+        "x": 0,
+        "y": 48
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH s AS (\n  SELECT *, CASE WHEN lag(ts) OVER w IS NULL\n                   OR lag(model_version) OVER w IS DISTINCT FROM model_version\n                   OR lag(dataset_version) OVER w IS DISTINCT FROM dataset_version\n                   OR ts - lag(ts) OVER w > interval '60 seconds' THEN 1 ELSE 0 END AS new_batch\n  FROM app_predictions WHERE $__timeFilter(ts) AND source = 'simulation'\n  WINDOW w AS (ORDER BY ts)),\nb AS (SELECT *, sum(new_batch) OVER (ORDER BY ts) AS batch FROM s)\nSELECT '#' || lpad(batch::text, 2, '0') || '  model v' || min(model_version) || ' \u00b7 '\n         || min(dataset_version) || ' images' AS \"batch\",\n       (100 * avg(predicted))::float AS \"predicted PNEUMONIA %\",\n       (100 * avg(true_label))::float AS \"actually PNEUMONIA %\",\n       (100 * avg((predicted = true_label)::int))::float AS \"accuracy %\"\nFROM b GROUP BY b.batch ORDER BY min(ts)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 90,
+            "lineWidth": 0,
+            "gradientMode": "none",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "predicted PNEUMONIA %"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#eb6834"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "actually PNEUMONIA %"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#a3a29d"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "accuracy %"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2a78d6"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "vertical",
+        "groupWidth": 0.75,
+        "barWidth": 0.95,
+        "showValue": "always",
+        "stacking": "none",
+        "xTickLabelRotation": -30,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "xTickLabelMaxLength": 28
+      }
+    },
+    {
+      "type": "barchart",
+      "id": 19,
+      "title": "Batch by batch \u2014 incoming image brightness",
+      "description": "The label-free drift signal: the average brightness of each batch. Bars are coloured by where the images really came from; the heights alone reveal it (dataset averages: v1 \u2248 123, v2 \u2248 140).",
+      "gridPos": {
+        "h": 10,
+        "w": 10,
+        "x": 14,
+        "y": 48
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH s AS (\n  SELECT *, CASE WHEN lag(ts) OVER w IS NULL\n                   OR lag(model_version) OVER w IS DISTINCT FROM model_version\n                   OR lag(dataset_version) OVER w IS DISTINCT FROM dataset_version\n                   OR ts - lag(ts) OVER w > interval '60 seconds' THEN 1 ELSE 0 END AS new_batch\n  FROM app_predictions WHERE $__timeFilter(ts) AND source = 'simulation'\n  WINDOW w AS (ORDER BY ts)),\nb AS (SELECT *, sum(new_batch) OVER (ORDER BY ts) AS batch FROM s)\nSELECT '#' || lpad(batch::text, 2, '0') || '  model v' || min(model_version) || ' \u00b7 '\n         || min(dataset_version) || ' images' AS \"batch\",\n       avg(mean_intensity) FILTER (WHERE dataset_version = 'v1') AS \"images from v1\",\n       avg(mean_intensity) FILTER (WHERE dataset_version = 'v2') AS \"images from v2\"\nFROM b GROUP BY b.batch ORDER BY min(ts)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1,
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 90,
+            "lineWidth": 0,
+            "gradientMode": "none",
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "images from v1"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2a78d6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "images from v2"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#eb6834"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "vertical",
+        "groupWidth": 0.75,
+        "barWidth": 0.95,
+        "showValue": "always",
+        "stacking": "normal",
+        "xTickLabelRotation": -30,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "xTickLabelMaxLength": 28
+      }
+    },
+    {
+      "type": "table",
+      "id": 20,
+      "title": "Batch summary",
+      "description": "A new batch starts when the model or the image dataset changes, or after a pause longer than 60 seconds.",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH s AS (\n  SELECT *, CASE WHEN lag(ts) OVER w IS NULL\n                   OR lag(model_version) OVER w IS DISTINCT FROM model_version\n                   OR lag(dataset_version) OVER w IS DISTINCT FROM dataset_version\n                   OR ts - lag(ts) OVER w > interval '60 seconds' THEN 1 ELSE 0 END AS new_batch\n  FROM app_predictions WHERE $__timeFilter(ts) AND source = 'simulation'\n  WINDOW w AS (ORDER BY ts)),\nb AS (SELECT *, sum(new_batch) OVER (ORDER BY ts) AS batch FROM s)\nSELECT batch AS \"#\", min(ts) AS \"Started\", 'v' || min(model_version) AS \"Model\",\n       min(dataset_version) AS \"Images from\", count(*) AS \"Images\",\n       (100 * avg(predicted))::float AS \"Predicted PNEUMONIA %\",\n       (100 * avg(true_label))::float AS \"Actually PNEUMONIA %\",\n       (100 * avg((predicted = true_label)::int))::float AS \"Accuracy %\",\n       avg(mean_intensity) AS \"Brightness\", avg(std_intensity) AS \"Contrast\"\nFROM b GROUP BY batch ORDER BY min(ts)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(Predicted PNEUMONIA %|Actually PNEUMONIA %|Accuracy %)$"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(Brightness|Contrast)$"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Predicted PNEUMONIA share per minute, by model version",
+      "description": "Solid: what the model predicts. Dashed: the true share. The gap widens when drift arrives.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(ts, '1m'),\n       (100 * avg(predicted) FILTER (WHERE model_version = 1))::float AS \"model v1\",\n       (100 * avg(predicted) FILTER (WHERE model_version = 2))::float AS \"model v2\",\n       (100 * avg(predicted) FILTER (WHERE model_version = 3))::float AS \"model v3\"\nFROM app_predictions WHERE $__timeFilter(ts) AND ('${source}' = 'all' OR source = '${source}')\nGROUP BY 1 ORDER BY 1"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(ts, '1m'), (100 * avg(true_label))::float AS \"actually PNEUMONIA (labels)\"\nFROM app_predictions WHERE $__timeFilter(ts) AND true_label IS NOT NULL AND ('${source}' = 'all' OR source = '${source}')\nGROUP BY 1 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 7,
+            "spanNulls": false,
+            "insertNulls": 90000,
+            "fillOpacity": 0,
+            "axisSoftMin": 40,
+            "axisSoftMax": 100
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model v1"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2a78d6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model v2"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#eb6834"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model v3"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#1baf7a"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "actually PNEUMONIA (labels)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#a3a29d"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    6
+                  ]
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "Accuracy per minute (labelled traffic), by model version",
+      "description": "Only possible because simulated traffic carries labels \u2014 real traffic usually doesn't, which is why the label-free signals on the left and below matter.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(ts, '1m'),\n       (100 * avg((predicted = true_label)::int) FILTER (WHERE model_version = 1))::float AS \"model v1\",\n       (100 * avg((predicted = true_label)::int) FILTER (WHERE model_version = 2))::float AS \"model v2\",\n       (100 * avg((predicted = true_label)::int) FILTER (WHERE model_version = 3))::float AS \"model v3\"\nFROM app_predictions WHERE $__timeFilter(ts) AND true_label IS NOT NULL AND ('${source}' = 'all' OR source = '${source}')\nGROUP BY 1 ORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 7,
+            "spanNulls": false,
+            "insertNulls": 90000,
+            "fillOpacity": 0,
+            "axisSoftMin": 60,
+            "axisSoftMax": 100
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model v1"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2a78d6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model v2"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#eb6834"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model v3"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#1baf7a"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 23,
+      "title": "Incoming image brightness vs dataset references",
+      "description": "Average brightness of the images the app received each minute, against the Step 1 averages.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 73
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(ts, '1m'), avg(mean_intensity) AS \"incoming images\"\nFROM app_predictions WHERE $__timeFilter(ts) AND ('${source}' = 'all' OR source = '${source}')\nGROUP BY 1 ORDER BY 1"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "WITH ds AS (\n  SELECT DISTINCT ON (t.value) t.value AS version, r.run_uuid\n  FROM runs r\n  JOIN experiments e ON e.experiment_id = r.experiment_id AND e.name = 'xray-datasets'\n  JOIN tags t ON t.run_uuid = r.run_uuid AND t.key = 'dataset_version'\n  WHERE r.lifecycle_stage = 'active'\n  ORDER BY t.value, r.start_time DESC)\nSELECT g.t AS \"time\", (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v1' AND m.key = 'mean_intensity_avg') AS \"dataset v1 average\",\n       (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v2' AND m.key = 'mean_intensity_avg') AS \"dataset v2 average\"\nFROM generate_series($__timeFrom()::timestamptz, $__timeTo()::timestamptz, interval '1 minute') AS g(t)\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 7,
+            "spanNulls": false,
+            "insertNulls": 90000,
+            "fillOpacity": 0,
+            "axisSoftMin": null,
+            "axisSoftMax": null
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "incoming images"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#52514e"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dataset v1 average"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2a78d6"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    6
+                  ]
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.insertNulls",
+                "value": false
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dataset v2 average"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#eb6834"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    6
+                  ]
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.insertNulls",
+                "value": false
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 24,
+      "title": "Incoming image contrast vs dataset references",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 73
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT $__timeGroupAlias(ts, '1m'), avg(std_intensity) AS \"incoming images\"\nFROM app_predictions WHERE $__timeFilter(ts) AND ('${source}' = 'all' OR source = '${source}')\nGROUP BY 1 ORDER BY 1"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "WITH ds AS (\n  SELECT DISTINCT ON (t.value) t.value AS version, r.run_uuid\n  FROM runs r\n  JOIN experiments e ON e.experiment_id = r.experiment_id AND e.name = 'xray-datasets'\n  JOIN tags t ON t.run_uuid = r.run_uuid AND t.key = 'dataset_version'\n  WHERE r.lifecycle_stage = 'active'\n  ORDER BY t.value, r.start_time DESC)\nSELECT g.t AS \"time\", (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v1' AND m.key = 'std_intensity_avg') AS \"dataset v1 average\",\n       (SELECT m.value FROM ds JOIN latest_metrics m ON m.run_uuid = ds.run_uuid WHERE ds.version = 'v2' AND m.key = 'std_intensity_avg') AS \"dataset v2 average\"\nFROM generate_series($__timeFrom()::timestamptz, $__timeTo()::timestamptz, interval '1 minute') AS g(t)\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 7,
+            "spanNulls": false,
+            "insertNulls": 90000,
+            "fillOpacity": 0,
+            "axisSoftMin": null,
+            "axisSoftMax": null
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "incoming images"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#52514e"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dataset v1 average"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2a78d6"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    6
+                  ]
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.insertNulls",
+                "value": false
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dataset v2 average"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#eb6834"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    6
+                  ]
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.insertNulls",
+                "value": false
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "table",
+      "id": 25,
+      "title": "Prediction log (latest 200)",
+      "description": "",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 81
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mlflow-postgres"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mlflow-postgres"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT ts AS \"Time\", source AS \"Source\", 'v' || model_version AS \"Model\",\n       dataset_version AS \"Images from\", image_ref AS \"Image\",\n       CASE true_label WHEN 1 THEN 'PNEUMONIA' WHEN 0 THEN 'NORMAL' END AS \"Truth\",\n       CASE predicted WHEN 1 THEN 'PNEUMONIA' ELSE 'NORMAL' END AS \"Predicted\",\n       prob_pneumonia AS \"P(pneumonia)\", mean_intensity AS \"Brightness\", std_intensity AS \"Contrast\",\n       latency_ms AS \"Latency (ms)\"\nFROM app_predictions WHERE $__timeFilter(ts) ORDER BY ts DESC LIMIT 200"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(P\\(pneumonia\\))$"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(Brightness|Contrast|Latency \\(ms\\))$"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "source",
+        "label": "Traffic",
+        "type": "custom",
+        "hide": 0,
+        "query": "Simulated batches only : simulation, All traffic (incl. hand-picked) : all",
+        "current": {
+          "selected": true,
+          "text": "Simulated batches only",
+          "value": "simulation"
+        },
+        "options": [],
+        "multi": false,
+        "includeAll": false
+      },
+      {
+        "name": "metric",
+        "label": "Metric",
+        "type": "custom",
+        "hide": 0,
+        "query": "Macro F1 : f1_macro, Accuracy : accuracy, ROC-AUC : roc_auc, NORMAL recall : recall_normal, PNEUMONIA recall : recall_pneumonia",
+        "current": {
+          "selected": true,
+          "text": "Macro F1",
+          "value": "f1_macro"
+        },
+        "options": [],
+        "multi": false,
+        "includeAll": false
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "name": "Traffic batches",
+        "enable": true,
+        "iconColor": "#52514e",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "mlflow-postgres"
+        },
+        "target": {
+          "refId": "Anno",
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH s AS (\n  SELECT *, CASE WHEN lag(ts) OVER w IS NULL\n                   OR lag(model_version) OVER w IS DISTINCT FROM model_version\n                   OR lag(dataset_version) OVER w IS DISTINCT FROM dataset_version\n                   OR ts - lag(ts) OVER w > interval '60 seconds' THEN 1 ELSE 0 END AS new_batch\n  FROM app_predictions WHERE $__timeFilter(ts) AND source = 'simulation'\n  WINDOW w AS (ORDER BY ts)),\nb AS (SELECT *, sum(new_batch) OVER (ORDER BY ts) AS batch FROM s)\nSELECT min(ts) AS time,\n       'Batch #' || batch || ': model v' || min(model_version) || ' on ' || min(dataset_version) || ' images'\n         AS text,\n       'batch' AS tags\nFROM b GROUP BY batch ORDER BY batch"
+        }
+      }
+    ]
+  }
+}

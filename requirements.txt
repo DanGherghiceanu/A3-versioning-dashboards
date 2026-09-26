@@ -1,0 +1,8 @@
+# Host-side scripts (run from your venv, not in Docker).
+# mlflow must match the server version in mlflow/Dockerfile.
+mlflow==3.16.1
+pandas
+numpy
+pillow
+matplotlib
+scikit-learn

@@ -1,0 +1,4 @@
+# Same versions A1 trained with and A2 serves with. Install with:
+#   pip install --index-url https://download.pytorch.org/whl/cpu -r requirements-torch.txt
+torch==2.13.0
+torchvision==0.28.0
